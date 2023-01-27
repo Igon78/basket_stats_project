@@ -1,18 +1,28 @@
 import io
+import urllib
+from json import JSONDecodeError
+from tkinter.ttk import Combobox
 from urllib.request import urlopen
 
-from nba_api.stats.endpoints import playercareerstats
+import joblib
+from nba_api.stats.endpoints import playercareerstats, leaguegamefinder, leaguedashteamstats, \
+    teamdashboardbygeneralsplits
 from nba_api.stats.endpoints import shotchartdetail
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import leaguestandings
+from nba_api.stats.static import teams
 
 import tkinter as tk
 from tkinter import ttk, BOTH
 from tkinter import Frame, Label, Button
 import tkinter.messagebox
 from PIL import Image, ImageTk
+import pickle
+
 from ttkwidgets.autocomplete import AutocompleteCombobox
 
+from sklearn.linear_model import LogisticRegression
+import sklearn.linear_model._logistic
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, Rectangle, Arc
@@ -82,8 +92,12 @@ def createHeatMap(side=0):
             widget.destroy()
 
         # pobranie i przygotowanie danych o rzutach zawodnika z wybranego sezonu
-        shoot_stats = shotchartdetail.ShotChartDetail(player_id=player_id,season_nullable=season,team_id=0,context_measure_simple='FGA',
-                    season_type_all_star = ['Regular Season', 'Playoffs']).get_data_frames()[0]
+        try:
+            shoot_stats = shotchartdetail.ShotChartDetail(player_id=player_id,season_nullable=season,team_id=0,context_measure_simple='FGA',
+                        season_type_all_star = ['Regular Season', 'Playoffs']).get_data_frames()[0]
+        except JSONDecodeError:
+            tkinter.messagebox.showerror("Problem ze strony serwera", "Spróbuj wczytać dane jeszcze raz")
+            return 0
         if shoot_stats.empty:
             tkinter.messagebox.showerror("Niepoprawny sezon", "Brak danych dla zawodnika w podanym sezonie")
             return 0
@@ -194,9 +208,13 @@ def createHeatMap(side=0):
 def createStandings():
     # stworzenie tabel
     tree_west = ttk.Treeview(standingsFrame, show='headings')
-    tree_west.place(relx=0, rely=0.15, relheight=0.85, relwidth=0.5)
+    tree_west.place(relx=0.045, rely=0.40, relheight=0.55, relwidth=0.45)
+    westLabel = Label(standingsFrame, text= 'West Conference')
+    westLabel.place(relx=0.145, rely=0.35, relheight=0.05, relwidth=0.25)
     tree_east = ttk.Treeview(standingsFrame, show='headings')
-    tree_east.place(relx=0.5, rely=0.15, relheight=0.85, relwidth=0.5)
+    tree_east.place(relx=0.505, rely=0.40, relheight=0.55, relwidth=0.45)
+    eastLabel = Label(standingsFrame,text='East Conference')
+    eastLabel.place(relx=0.605,rely=0.35, relheight=0.05, relwidth=0.25)
     columns = ['Rank','Team','Record','WinPCT','L10']
     tree_west.configure(columns=columns)
     tree_east.configure(columns=columns)
@@ -205,21 +223,99 @@ def createStandings():
         tree_west.heading(column, text=column)
         tree_east.column(column, minwidth=0, width=20)
         tree_east.heading(column, text=column)
-    #pobranie danych
-    stands = leaguestandings.LeagueStandings(season="2022-23").get_data_frames()[0][['PlayoffRank',
-                'TeamName','Conference','Division','Record','WinPCT','L10']]
-    stands_west = stands[stands['Conference'] == 'West']
-    stands_west.drop(columns=['Conference','Division'], inplace=True)
-    stands_east = stands[stands['Conference'] == 'East']
-    stands_east.drop(columns=['Conference','Division'], inplace=True)
-    #dodanie danych do tabeli
-    for index, row in stands_west.iterrows():
-        tree_west.insert("", 'end', values=list(row))
-    for index, row in stands_east.iterrows():
-        tree_east.insert("", 'end', values=list(row))
 
-def createTeams():
-    pass
+    def load_standings_conference(event):
+        # pobranie danych
+        season=seasonEntry.get()
+        stands = leaguestandings.LeagueStandings(season=season).get_data_frames()[0][['PlayoffRank',
+                    'TeamName','Conference','Division','Record','WinPCT','L10']]
+        stands_west = stands[stands['Conference'] == 'West']
+        stands_west.drop(columns=['Conference','Division'], inplace=True)
+        stands_east = stands[stands['Conference'] == 'East']
+        stands_east.drop(columns=['Conference','Division'], inplace=True)
+        try:
+            tree_west.delete(*tree_west.get_children()) # usunięcie danych z tabeli dotyczących wcześniej wyszukanego sezonu
+            tree_east.delete(*tree_east.get_children())
+        except Exception:
+            print('coś')
+        #dodanie danych do tabeli
+        for index, row in stands_west.iterrows():
+            tree_west.insert("", 'end', values=list(row))
+        for index, row in stands_east.iterrows():
+            tree_east.insert("", 'end', values=list(row))
+    #stworzenie menu
+    seasonLabel = Label(standingsFrame, text="Season")
+    seasonLabel.place(relx=0.045, rely=0.1, relheight=0.05, relwidth=0.1)
+
+    seasonEntry = Combobox(standingsFrame, width=30,values=[str(x - 1) + "-" + str(x)[2:4] for x in range(2023, 2000, -1)])
+    seasonEntry.place(relx=0.145, rely=0.1, relheight=0.05, relwidth=0.1)
+    seasonEntry.insert(0, '2022-23')
+    seasonEntry.bind("<<ComboboxSelected>>", load_standings_conference)
+
+def createPredictions():
+    teams_id = []
+    def showTeam(side=0):
+        imageFrame = Frame(predictionsFrame, bg='#ffffff')  # frame odpowiedzialny za wyświetlenie loga drużyny
+        imageFrame.place(x=side+100, rely=0.05, width=300, height=300)
+        imageLabel = Label(imageFrame)
+        imageLabel.pack()
+        def showLogo(event):
+            team_name = searchEntry.get().lower().replace(' ','-')
+            photo_url=f"https://loodibee.com/wp-content/uploads/nba-{team_name}-logo-300x300.png"
+            try:
+                url = urlopen(photo_url)
+            except urllib.error.HTTPError:
+                if(team_name=='los-angeles-clippers'): url = urlopen("https://loodibee.com/wp-content/uploads/nba-la-clippers-logo-300x300.png")
+                else: url = urlopen("https://loodibee.com/wp-content/uploads/nba-denver-nuggets-logo-2018-300x300.png")
+            image_raw = io.BytesIO(url.read())  # pobranie zdjęcia z linku
+            image_pil = Image.open(image_raw)  # konwersja zdjęcia na zmienną pillową
+            image_tk = ImageTk.PhotoImage(image_pil)  # konwersja zdjęcia na kompatybilne z tkinter
+            url.close()
+            imageLabel.configure(image=image_tk)  # ustawienie zdjęcia w widgetcie label
+            imageLabel.image = image_tk  # bez tej operacji garbage collector
+            if side==0: teams_id.insert(0,teams.find_teams_by_full_name(searchEntry.get())[0].get('id'))
+            else: teams_id.insert(1,teams.find_teams_by_full_name(searchEntry.get())[0].get('id'))
+        teamsArray = pd.DataFrame(
+        teams.get_teams()).full_name.values.tolist()  # pobranie listy nazw drużyn do wyszukiwania
+        searchEntry = Combobox(predictionsFrame, width=30,values=teamsArray)  # widget do wyboru drużyny z autokompletacją wyszukiwania
+        searchEntry.bind("<<ComboboxSelected>>", showLogo)
+        searchEntry.place(x=side+150, rely=0.55, relheight=0.05)
+        searchEntry.insert(0,'Choose team')
+    showTeam()
+    showTeam(400)
+
+    def predict_outcome():
+        def get_data():
+
+            generalTeamInfo = leaguedashteamstats.LeagueDashTeamStats(per_mode_detailed='Per100Possessions',timeout=120)
+            generalTeamDf = generalTeamInfo.get_data_frames()[0]
+
+            general = generalTeamDf[['TEAM_ID','W_PCT','REB','TOV','PLUS_MINUS']]
+            advancedTeamInfo = leaguedashteamstats.LeagueDashTeamStats(per_mode_detailed='Per100Possessions',measure_type_detailed_defense='Advanced',timeout=120)
+            advancedTeamDf = advancedTeamInfo.get_data_frames()[0]
+            advanced = advancedTeamDf[['TEAM_ID','OFF_RATING','DEF_RATING','TS_PCT']]
+
+            return pd.merge(general,advanced,on='TEAM_ID')
+        all_teams_data=get_data()
+        team_home = all_teams_data[all_teams_data['TEAM_ID']==teams_id[0]]
+        team_away = all_teams_data[all_teams_data['TEAM_ID']==teams_id[1]]
+        team_away.columns = ['TEAM_ID_AWAY','W_PCT_AWAY', 'REB_AWAY', 'TOV_AWAY', 'PLUS_MINUS_AWAY','OFF_RATING_AWAY', 'DEF_RATING_AWAY', 'TS_PCT_AWAY']
+        team_home.drop(columns=['TEAM_ID'],inplace=True)
+        team_away.drop(columns=['TEAM_ID_AWAY'],inplace=True)
+        team_home.reset_index(drop=True,inplace=True)
+        team_away.reset_index(drop=True,inplace=True)
+        team_all = pd.merge(team_home,team_away,left_index=True,right_index=True)
+
+        model_rf=joblib.load('rf_model.pkl')
+        print(model_rf.predict(team_all))
+        print(model_rf.predict_proba(team_all))
+        predicts_label.configure(text=f'{round(model_rf.predict_proba(team_all)[0][1],2)}_{round(model_rf.predict_proba(team_all)[0][0],2)}')
+
+    predicts_label = Label(predictionsFrame)
+    predicts_label.place(relx=0.5, rely=0.65, relheight=0.05, relwidth=0.15, anchor='n')
+    searchButton = Button(predictionsFrame, text="Make predictions",command=predict_outcome)
+    searchButton.place(relx=0.5, rely=0.55, relheight=0.05, relwidth=0.15,anchor='n')
+
 root = tkinter.Tk() #stworzenie okienka
 root.title('NBA stats')
 root.geometry('900x600')
@@ -229,8 +325,8 @@ root.grid_columnconfigure(0,weight=1)
 playersFrame = Frame(root, bg='#ffffff')
 playersFrame.grid(row=0,column=0,sticky="nsew")
 
-teamsFrame = Frame(root, bg='#ffffff')
-teamsFrame.grid(row=0,column=0,sticky="nsew")
+predictionsFrame = Frame(root, bg='#ffffff')
+predictionsFrame.grid(row=0,column=0,sticky="nsew")
 
 heatmapFrame = Frame(root, bg='#ffffff')
 heatmapFrame.grid(row=0,column=0,sticky="nsew")
@@ -244,10 +340,10 @@ def create_menu():
     createPlayers()
     createHeatMap()
     createHeatMap(0.5)
-    createTeams()
+    createPredictions()
     createStandings()
     menubar.add_command(label='Players',command=playersFrame.tkraise)
-    menubar.add_command(label='Teams',command=teamsFrame.tkraise)
+    menubar.add_command(label='Teams',command=predictionsFrame.tkraise)
     menubar.add_command(label='Shot heatmap',command=heatmapFrame.tkraise)
     menubar.add_command(label='Standings',command=standingsFrame.tkraise)
     root.config(menu=menubar)
