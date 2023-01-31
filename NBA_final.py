@@ -298,7 +298,7 @@ def createStandings():
     seasonEntry.bind("<<ComboboxSelected>>", load_standings_conference)
 
 def createPredictions():
-    teams_id = [] #lista pomocnicza dla id drużyn, które zostaną wybrane
+    teams_id = ['',''] #lista pomocnicza dla id drużyn, które zostaną wybrane
 
     def showTeam(side=0):
         '''# parametr side służy do określenia która strona okienka ma zostać stworzona.
@@ -328,9 +328,8 @@ def createPredictions():
             imageLabel.image = image_tk  # bez tej operacji garbage collector usuwa zdjęcie
 
         def getId(event): #funkcja pobierająca id drużyny i dodająca je do listy pomocniczej
-            if side == 0: teams_id.insert(0, teams.find_teams_by_full_name(searchEntry.get())[0].get('id'))
-            else: teams_id.insert(1, teams.find_teams_by_full_name(searchEntry.get())[0].get('id'))
-
+            if side == 0: teams_id[0] = teams.find_teams_by_full_name(searchEntry.get())[0].get('id')
+            if side ==400: teams_id[1] =  teams.find_teams_by_full_name(searchEntry.get())[0].get('id')
         # pobranie listy nazw drużyn do wyszukiwania
         teamsArray = pd.DataFrame(teams.get_teams()).full_name.values.tolist()
         # widget do wyboru drużyny z autokompletacją wyszukiwania
